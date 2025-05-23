@@ -18,6 +18,7 @@ use turbo_tasks_hash::hash_xxh3_hash64;
 use turbopack::evaluate_context::node_evaluate_asset_context;
 use turbopack_core::{
     asset::AssetContent,
+    chunk::ChunkingContext,
     context::AssetContext,
     ident::AssetIdent,
     issue::{IssueExt, IssueSeverity},
@@ -218,6 +219,7 @@ impl NextFontGoogleCssModuleReplacer {
         // requests to Google Fonts.
         let env = Vc::upcast::<Box<dyn ProcessEnv>>(CommandLineProcessEnv::new());
         let mocked_responses_path = &*env.read("NEXT_FONT_GOOGLE_MOCKED_RESPONSES".into()).await?;
+
         let stylesheet_str = mocked_responses_path
             .as_ref()
             .map_or_else(
@@ -227,6 +229,7 @@ impl NextFontGoogleCssModuleReplacer {
             .await?;
 
         let font_fallback = get_font_fallback(*self.project_path, options);
+        let is_dev_mode = self.execution_context.chunking_context().is_dev_mode();
 
         let stylesheet = match stylesheet_str {
             Some(s) => Some(
@@ -240,10 +243,23 @@ impl NextFontGoogleCssModuleReplacer {
                 .await?,
             ),
             None => {
+                // If we're in production mode, we want to fail the build to ensure proper font
+                // rendering.
+                if !*is_dev_mode.await? {
+                    bail!(
+                        "Failed to fetch `{}` from Google Fonts.",
+                        options.await?.font_family
+                    );
+                }
+
+                // Inform the user of the failure to retreive the stylesheet / font, but don't
+                // propagate this error. We don't want e.g. offline connections to prevent page
+                // renders during development.
                 println!(
                     "Failed to download `{}` from Google Fonts. Using fallback font instead.",
                     options.await?.font_family
                 );
+
                 None
             }
         };
@@ -616,16 +632,9 @@ async fn fetch_from_google_fonts(
     )
     .await?;
 
-    Ok(match &*result {
+    Ok(match *result {
         Ok(r) => Some(*r.await?.body),
         Err(err) => {
-            // Inform the user of the failure to retreive the stylesheet / font, but don't
-            // propagate this error. We don't want e.g. offline connections to prevent page
-            // renders during development. During production builds, however, this error
-            // should propagate.
-            //
-            // TODO(WEB-283): Use fallback in dev in this case
-            // TODO(WEB-293): Fail production builds (not dev) in this case
             err.to_issue(IssueSeverity::Warning.into(), virtual_path)
                 .to_resolved()
                 .await?

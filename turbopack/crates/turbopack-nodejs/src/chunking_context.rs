@@ -494,4 +494,11 @@ impl ChunkingContext for NodeJsChunkingContext {
             self.chunk_item_id_from_ident(AsyncLoaderModule::asset_ident_for(module))
         })
     }
+
+    #[turbo_tasks::function]
+    async fn is_dev_mode(self: Vc<Self>) -> Result<Vc<bool>> {
+        Ok(Vc::cell(
+            self.await?.runtime_type == RuntimeType::Development,
+        ))
+    }
 }

@@ -249,6 +249,8 @@ pub trait ChunkingContext {
     fn chunk_item_id_from_module(self: Vc<Self>, module: Vc<Box<dyn Module>>) -> Vc<ModuleId> {
         self.chunk_item_id_from_ident(module.ident())
     }
+
+    fn is_dev_mode(self: Vc<Self>) -> Result<Vc<bool>>;
 }
 
 pub trait ChunkingContextExt {
