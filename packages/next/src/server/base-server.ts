@@ -3638,7 +3638,7 @@ export default abstract class Server<
       }
 
       // Mark that the request did postpone.
-      if (didPostpone) {
+      if (didPostpone && !isDynamicRSCRequest) {
         res.setHeader(NEXT_DID_POSTPONE_HEADER, '1')
       }
 
