@@ -9760,6 +9760,7 @@ dependencies = [
  "concurrent-queue",
  "dashmap 6.1.0",
  "dunce",
+ "either",
  "futures",
  "futures-retry",
  "include_dir",
