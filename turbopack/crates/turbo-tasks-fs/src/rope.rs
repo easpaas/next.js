@@ -156,12 +156,28 @@ fn compress_bytes(bytes: Cow<'static, [u8]>) -> RopeElem {
 
     match bytes {
         Cow::Borrowed(b) => Static(b),
-        Cow::Owned(b) => Compressed(b.len() as u32, b),
+        Cow::Owned(b) => {
+            let mut encoder = lz4::EncoderBuilder::new()
+                .build(Vec::new())
+                .expect("lz4 version mismatch");
+
+            encoder.write_all(&b).expect("failed to compress bytes");
+
+            let (output, result) = encoder.finish();
+            result.expect("failed to compress bytes");
+
+            Compressed(output.len() as u32, output)
+        }
     }
 }
 
 fn decompress_bytes(bytes: &[u8], len: u32) -> Cow<[u8]> {
-    Cow::Borrowed(bytes)
+    let mut decoder = lz4::Decoder::new(Cursor::new(bytes)).expect("lz4 version mismatch");
+    let mut buf = Vec::with_capacity(len as usize);
+    decoder.read_to_end(&mut buf).unwrap_or_else(|err| {
+        unreachable!("internal error: failed to decompress bytes while we compressed them. {err:?}")
+    });
+    Cow::Owned(buf)
 }
 
 impl RopeBuilder {
