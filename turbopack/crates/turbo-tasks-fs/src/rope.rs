@@ -9,7 +9,7 @@ use std::{
     task::{Context as TaskContext, Poll},
 };
 
-use RopeElem::{Local, Shared};
+use RopeElem::{Compressed, Shared, Static};
 use anyhow::{Context, Result};
 use bytes::Buf;
 use futures::Stream;
@@ -46,8 +46,11 @@ struct InnerRope(Arc<Vec<RopeElem>>);
 /// Differentiates the types of stored bytes in a rope.
 #[derive(Clone, Debug)]
 enum RopeElem {
+    Static(&'static [u8]),
     /// Local bytes are owned directly by this rope.
-    Local(Cow<'static, [u8]>),
+    ///
+    /// The u32 is the original length of the compressed bytes.
+    Compressed(u32, Vec<u8>),
 
     /// Shared holds the Arc container of another rope.
     Shared(InnerRope),
@@ -142,10 +145,23 @@ impl From<Cow<'static, [u8]>> for Rope {
         } else {
             Rope {
                 length: bytes.len(),
-                data: InnerRope(Arc::new(vec![Local(bytes)])),
+                data: InnerRope(Arc::new(vec![compress_bytes(bytes)])),
             }
         }
     }
+}
+
+fn compress_bytes(bytes: Cow<'static, [u8]>) -> RopeElem {
+    debug_assert!(!bytes.is_empty(), "must not have empty bytes");
+
+    match bytes {
+        Cow::Borrowed(b) => Static(b),
+        Cow::Owned(b) => Compressed(b.len() as u32, b),
+    }
+}
+
+fn decompress_bytes(bytes: &[u8], len: u32) -> Cow<[u8]> {
+    Cow::Borrowed(bytes)
 }
 
 impl RopeBuilder {
@@ -174,7 +190,7 @@ impl RopeBuilder {
         self.finish();
 
         self.length += bytes.len();
-        self.committed.push(Local(Cow::Borrowed(bytes)));
+        self.committed.push(Static(bytes));
     }
 
     /// Concatenate another Rope instance into our builder.
@@ -201,7 +217,7 @@ impl RopeBuilder {
         if let Some(b) = self.uncommitted.finish() {
             debug_assert!(!b.is_empty(), "must not have empty uncommitted bytes");
             self.length += b.len();
-            self.committed.push(Local(b));
+            self.committed.push(compress_bytes(b));
         }
     }
 
@@ -467,7 +483,7 @@ impl InnerRope {
         match &self[..] {
             [] => Ok(Cow::Borrowed("")),
             [Shared(inner)] => inner.to_str(len),
-            [Local(bytes)] => {
+            [Static(bytes)] => {
                 let utf8 = std::str::from_utf8(bytes);
                 utf8.context("failed to convert rope into string")
                     .map(Cow::Borrowed)
@@ -487,7 +503,7 @@ impl InnerRope {
         match &self[..] {
             [] => Cow::Borrowed(EMPTY_BUF),
             [Shared(inner)] => inner.to_bytes(len),
-            [Local(bytes)] => Cow::Borrowed(bytes),
+            [Static(bytes)] => Cow::Borrowed(bytes),
             _ => {
                 let mut read = RopeReader::new(self, 0);
                 let mut buf = Vec::with_capacity(len);
@@ -543,7 +559,8 @@ impl From<Vec<RopeElem>> for InnerRope {
             // It's important that an InnerRope never contain an empty Bytes section.
             for el in els.iter() {
                 match el {
-                    Local(b) => debug_assert!(!b.is_empty(), "must not have empty Bytes"),
+                    Static(b) => debug_assert!(!b.is_empty(), "must not have empty Bytes"),
+                    Compressed(_, b) => debug_assert!(!b.is_empty(), "must not have empty Bytes"),
                     Shared(s) => {
                         // We check whether the shared slice is empty, and not its elements. The
                         // only way to construct the Shared's InnerRope is
@@ -570,7 +587,7 @@ impl Deref for InnerRope {
 impl RopeElem {
     fn maybe_cmp(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {
-            (Local(a), Local(b)) => {
+            (Static(a), Static(b)) => {
                 if a.len() == b.len() {
                     return Some(a.cmp(b));
                 }
@@ -579,6 +596,15 @@ impl RopeElem {
                 // contains the missing bytes.
                 None
             }
+
+            (Compressed(a, b), Compressed(c, d)) => {
+                if a == c {
+                    return Some(b.cmp(d));
+                }
+
+                None
+            }
+
             (Shared(a), Shared(b)) => {
                 if Arc::ptr_eq(&a.0, &b.0) {
                     return Some(Ordering::Equal);
@@ -594,7 +620,8 @@ impl RopeElem {
 
     fn into_bytes(self, len: usize) -> Cow<'static, [u8]> {
         match self {
-            Local(bytes) => bytes,
+            Static(bytes) => Cow::Borrowed(bytes),
+            Compressed(len, bytes) => Cow::Owned(decompress_bytes(&bytes, len).into_owned()),
             Shared(inner) => inner.into_bytes(len),
         }
     }
@@ -606,7 +633,11 @@ impl DeterministicHash for RopeElem {
     /// do not contain a length.
     fn deterministic_hash<H: DeterministicHasher>(&self, state: &mut H) {
         match self {
-            Local(bytes) => state.write_bytes(bytes),
+            Static(bytes) => state.write_bytes(bytes),
+            Compressed(len, bytes) => {
+                let bytes = decompress_bytes(bytes, *len);
+                state.write_bytes(&bytes);
+            }
             Shared(inner) => inner.deterministic_hash(state),
         }
     }
@@ -763,7 +794,10 @@ impl Stream for RopeReader {
 impl From<RopeElem> for StackElem {
     fn from(el: RopeElem) -> Self {
         match el {
-            Local(bytes) => Self::Local(Cursor::new(bytes)),
+            Static(bytes) => Self::Local(Cursor::new(Cow::Borrowed(bytes))),
+            Compressed(len, bytes) => Self::Local(Cursor::new(Cow::Owned(
+                decompress_bytes(&bytes, len).into_owned(),
+            ))),
             Shared(inner) => Self::Shared(inner, 0),
         }
     }
@@ -779,13 +813,13 @@ mod test {
 
     use anyhow::Result;
 
-    use super::{InnerRope, Rope, RopeBuilder, RopeElem};
+    use super::{InnerRope, Rope, RopeBuilder, RopeElem, compress_bytes};
 
     // These are intentionally not exposed, because they do inefficient conversions
     // in order to fully test cases.
     impl From<&str> for RopeElem {
         fn from(value: &str) -> Self {
-            RopeElem::Local(value.to_string().into_bytes().into())
+            compress_bytes(Cow::Owned(value.to_string().into_bytes()))
         }
     }
     impl From<Vec<RopeElem>> for RopeElem {
@@ -815,7 +849,8 @@ mod test {
     impl RopeElem {
         fn len(&self) -> usize {
             match self {
-                RopeElem::Local(b) => b.len(),
+                RopeElem::Static(b) => b.len(),
+                RopeElem::Compressed(len, _) => *len as usize,
                 RopeElem::Shared(r) => r.len(),
             }
         }
