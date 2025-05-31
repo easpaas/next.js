@@ -67,21 +67,21 @@ import type { ServerOnInstrumentationRequestError } from '../app-render/types'
 import type { ServerComponentsHmrCache } from '../response-cache'
 import { logRequests } from './log-requests'
 import { FallbackMode } from '../../lib/fallback'
-import type { PagesDevOverlayType } from '../../client/components/react-dev-overlay/pages/pages-dev-overlay'
+import type { PagesDevOverlayBridgeType } from '../../client/components/react-dev-overlay/pages/pages-dev-overlay-bridge'
 import {
   ensureInstrumentationRegistered,
   getInstrumentationModule,
 } from '../lib/router-utils/instrumentation-globals.external'
 
 // Load ReactDevOverlay only when needed
-let ReactDevOverlayImpl: PagesDevOverlayType
-const ReactDevOverlay: PagesDevOverlayType = (props) => {
-  if (ReactDevOverlayImpl === undefined) {
-    ReactDevOverlayImpl =
-      require('../../client/components/react-dev-overlay/pages/pages-dev-overlay')
-        .PagesDevOverlay as PagesDevOverlayType
+let PagesDevOverlayBridgeImpl: PagesDevOverlayBridgeType
+const ReactDevOverlay: PagesDevOverlayBridgeType = (props) => {
+  if (PagesDevOverlayBridgeImpl === undefined) {
+    PagesDevOverlayBridgeImpl = (
+      require('../../client/components/react-dev-overlay/pages/pages-dev-overlay-bridge') as typeof import('../../client/components/react-dev-overlay/pages/pages-dev-overlay-bridge')
+    ).PagesDevOverlayBridge
   }
-  return ReactDevOverlayImpl(props)
+  return PagesDevOverlayBridgeImpl(props)
 }
 
 export interface Options extends ServerOptions {
